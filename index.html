@@ -727,53 +727,56 @@ var STORE_META = 'meta';
 var db = null;
 
 function openDB(cb) {
-  try {
-    var req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = function(e) {
-      var d = e.target.result;
-      if (!d.objectStoreNames.contains(STORE_TABS)) d.createObjectStore(STORE_TABS, { keyPath: 'id' });
-      if (!d.objectStoreNames.contains(STORE_META)) d.createObjectStore(STORE_META, { keyPath: 'key' });
-    };
-    req.onsuccess = function(e) { db = e.target.result; if (cb) cb(); };
-    req.onerror = function() { db = null; if (cb) cb(); };
-  } catch(e) { db = null; if (cb) cb(); }
-}
+      try {
+        var req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = function(e) {
+          var d = e.target.result;
+          if (!d.objectStoreNames.contains(STORE_TABS)) d.createObjectStore(STORE_TABS, { keyPath: 'id' });
+          if (!d.objectStoreNames.contains(STORE_META)) d.createObjectStore(STORE_META, { keyPath: 'key' });
+        };
+        req.onsuccess = function(e) { db = e.target.result; db.onclose = function() { db = null; }; db.onerror = function() { db = null; }; if (cb) cb(); };
+        req.onerror = function() { db = null; if(el&&el.loading)el.loading.classList.remove('active'); if (cb) cb(); };
+        req.onblocked = function() { db = null; if(el&&el.loading)el.loading.classList.remove('active'); if (cb) cb(); };
+      } catch(e) { db = null; if(el&&el.loading)el.loading.classList.remove('active'); if (cb) cb(); }
+    }
 
 function saveTabs() {
-  if (!db) return;
-  try {
-    var tx = db.transaction([STORE_TABS, STORE_META], 'readwrite');
-    var tStore = tx.objectStore(STORE_TABS);
-    var mStore = tx.objectStore(STORE_META);
-    tStore.clear();
-    for (var i = 0; i < tabs.length; i++) {
-      tStore.put({ id: tabs[i].id, name: tabs[i].name, size: tabs[i].size, raw: tabs[i].raw, parsed: tabs[i].parsed });
+      if (!db) return;
+      try {
+        var tx = db.transaction([STORE_TABS, STORE_META], 'readwrite');
+        var tStore = tx.objectStore(STORE_TABS);
+        var mStore = tx.objectStore(STORE_META);
+        tStore.clear();
+        for (var i = 0; i < tabs.length; i++) {
+          tStore.put({ id: tabs[i].id, name: tabs[i].name, size: tabs[i].size, raw: tabs[i].raw });
+        }
+        mStore.put({ key: 'activeTabId', value: activeTabId });
+        mStore.put({ key: 'tabIdCounter', value: tabIdCounter });
+        mStore.put({ key: 'theme', value: state.theme });
+        mStore.put({ key: 'zoomLevel', value: zoomLevel });
+        tx.onerror = function(e) { console.warn('IndexedDB save failed:', e.target.error); };
+      } catch(e) { console.warn('saveTabs error:', e); }
     }
-    mStore.put({ key: 'activeTabId', value: activeTabId });
-    mStore.put({ key: 'tabIdCounter', value: tabIdCounter });
-    mStore.put({ key: 'theme', value: state.theme });
-    mStore.put({ key: 'zoomLevel', value: zoomLevel });
-  } catch(e) {}
-}
 
 function loadTabs(cb) {
-  if (!db) { cb([], {}); return; }
-  try {
-    var tx = db.transaction([STORE_TABS, STORE_META], 'readonly');
-    var tStore = tx.objectStore(STORE_TABS);
-    var mStore = tx.objectStore(STORE_META);
-    var tabReq = tStore.getAll();
-    var metaReq = mStore.getAll();
-    var result = { tabs: [], meta: {} };
-    tabReq.onsuccess = function() { result.tabs = tabReq.result || []; };
-    metaReq.onsuccess = function() {
-      var m = metaReq.result || [];
-      for (var i = 0; i < m.length; i++) result.meta[m[i].key] = m[i].value;
-    };
-    tx.oncomplete = function() { cb(result.tabs, result.meta); };
-    tx.onerror = function() { cb([], {}); };
-  } catch(e) { cb([], {}); }
-}
+      if (!db) { if(el&&el.loading)el.loading.classList.remove('active'); cb([], {}); return; }
+      try {
+        var tx = db.transaction([STORE_TABS, STORE_META], 'readonly');
+        var tStore = tx.objectStore(STORE_TABS);
+        var mStore = tx.objectStore(STORE_META);
+        var tabReq = tStore.getAll();
+        var metaReq = mStore.getAll();
+        var result = { tabs: [], meta: {} };
+        var safetyTimer = setTimeout(function() { if(el&&el.loading)el.loading.classList.remove('active'); cb(result.tabs, result.meta); cb = function(){}; }, 5000);
+        tabReq.onsuccess = function() { result.tabs = tabReq.result || []; };
+        metaReq.onsuccess = function() {
+          var m = metaReq.result || [];
+          for (var i = 0; i < m.length; i++) result.meta[m[i].key] = m[i].value;
+        };
+        tx.oncomplete = function() { clearTimeout(safetyTimer); cb(result.tabs, result.meta); };
+        tx.onerror = function() { clearTimeout(safetyTimer); if(el&&el.loading)el.loading.classList.remove('active'); cb([], {}); };
+      } catch(e) { if(el&&el.loading)el.loading.classList.remove('active'); cb([], {}); }
+    }
 
 function deleteTabFromDB(tabId) {
   if (!db) return;
@@ -1039,21 +1042,22 @@ function updateFileInfo() {
 
 /* ===== FILE LOADING ===== */
 function loadFile(file) {
-  if (!file) return;
-  var ext = file.name.split('.').pop().toLowerCase();
-  if (['md','markdown','txt','mdown','mkdn','mdwn','mkd','text'].indexOf(ext) === -1) { alert('Please select a Markdown file.'); return; }
-  if (file.size > 50 * 1024 * 1024) { alert('File too large. Max 50MB.'); return; }
+      if (!file) return;
+      var ext = file.name.split('.').pop().toLowerCase();
+      if (['md','markdown','txt','mdown','mkdn','mdwn','mkd','text'].indexOf(ext) === -1) { alert('Please select a Markdown file.'); return; }
+      if (file.size > 50 * 1024 * 1024) { alert('File too large. Max 50MB.'); return; }
 
-  el.loading.classList.add('active');
-  if (file.size > 5 * 1024 * 1024) {
-    readFileChunked(file);
-  } else {
-    var reader = new FileReader();
-    reader.onload = function(e) { el.loading.classList.remove('active'); renderMarkdown(e.target.result, file.name, file.size); };
-    reader.onerror = function() { el.loading.classList.remove('active'); alert('Error reading file.'); };
-    reader.readAsText(file);
-  }
-}
+      el.loading.classList.add('active');
+      var loadSafetyTimer = setTimeout(function() { el.loading.classList.remove('active'); }, 10000);
+      if (file.size > 5 * 1024 * 1024) {
+        readFileChunked(file);
+      } else {
+        var reader = new FileReader();
+        reader.onload = function(e) { clearTimeout(loadSafetyTimer); el.loading.classList.remove('active'); renderMarkdown(e.target.result, file.name, file.size); };
+        reader.onerror = function() { clearTimeout(loadSafetyTimer); el.loading.classList.remove('active'); alert('Error reading file.'); };
+        reader.readAsText(file);
+      }
+    }
 
 function readFileChunked(file) {
   var chunkSize = 5*1024*1024, offset = 0, chunks = [];
@@ -1229,7 +1233,7 @@ function init(){
         for(var i=0;i<saved.length;i++){
           var s=saved[i];
           if(!s.id){tabIdCounter++;s.id='tab-'+tabIdCounter;}
-          tabs.push({id:s.id,name:s.name,size:s.size,raw:s.raw,parsed:s.parsed,scrollY:0});
+            tabs.push({id:s.id,name:s.name,size:s.size,raw:s.raw,parsed:parseMarkdown(s.raw),scrollY:0});
         }
         renderTabs();
         var restoreId = meta.activeTabId && tabs.find(function(t){return t.id===meta.activeTabId;}) ? meta.activeTabId : tabs[tabs.length-1].id;
@@ -1238,6 +1242,7 @@ function init(){
       }
       setupDragDrop();
       setTheme(state.theme);
+            el.loading.classList.remove('active');
     });
   });
 
